@@ -26,6 +26,20 @@ try:
 except ImportError:
     print("[WARN] VideoObjectDetection brick not available — detection disabled")
 
+# ─── LLM Brick (trash-talking commentator) ───────────────────────────────
+_llm = None
+LLM_PERSONA = (
+    "You are the Arduino UNO Q, a cheeky and competitive robot playing "
+    "Rock Paper Scissors against a human. Reply with a single short, funny, "
+    "playful, PG-rated sentence. Do not use emojis. Do not explain the rules."
+)
+try:
+    from arduino.app_bricks.llm import LargeLanguageModel
+    _llm = LargeLanguageModel(system_prompt=LLM_PERSONA, max_tokens=80, temperature=0.9)
+    print("[BRICK] LargeLanguageModel initialized")
+except ImportError:
+    print("[WARN] LLM brick not available — commentary disabled")
+
 # ─── App Runner ──────────────────────────────────────────────────────────
 _App = None
 try:
@@ -67,6 +81,8 @@ class GameState:
         self.detection = None
         self.confidence = 0.0
         self._detection_locked = False
+        self.llm_comment = None
+        self.llm_state = 'idle'
         self.history = []
 
     def update_detection(self, label, confidence):
@@ -91,6 +107,8 @@ class GameState:
             self.arduino_move = arduino_move
             self.human_move = None
             self.winner = None
+            self.llm_comment = None
+            self.llm_state = 'idle'
 
         print(f"[GAME] Locked detection: {detected} ({conf:.0%})" if detected else
               "[GAME] Locked detection: none")
@@ -141,6 +159,8 @@ class GameState:
         print(f"[GAME] Round {round_record['round']}: "
               f"Human={human_move or '?'} vs Arduino={arduino_move} -> {winner}")
 
+        self._generate_comment(winner, human_move, arduino_move)
+
         time.sleep(RESULT_HOLD_SECS)
 
         with self._lock:
@@ -148,6 +168,41 @@ class GameState:
             self._detection_locked = False
 
         return round_record
+
+    def _generate_comment(self, winner, human_move, arduino_move):
+        """Ask the LLM for a witty line about the round. No-op if brick absent."""
+        if not _llm:
+            return
+
+        if winner == 'human':
+            prompt = (f"You just LOST: the human played {human_move} and beat your "
+                      f"{arduino_move}. Make a funny, dramatic excuse for why you lost.")
+        elif winner == 'arduino':
+            prompt = (f"You just WON: your {arduino_move} beat the human's {human_move}. "
+                      f"Tease the human in a funny, playful way.")
+        elif winner == 'draw':
+            prompt = (f"It's a draw — you both played {arduino_move}. "
+                      f"Make a funny remark about the tie.")
+        else:
+            prompt = ("The human failed to show a clear hand gesture in time. "
+                      "Playfully tell them to show their hand properly next round.")
+
+        with self._lock:
+            self.llm_state = 'thinking'
+            self.llm_comment = None
+
+        try:
+            text = _llm.chat(prompt).strip()
+        except Exception as e:
+            print(f"[LLM] generation failed: {e}")
+            with self._lock:
+                self.llm_state = 'idle'
+            return
+
+        print(f"[LLM] {text}")
+        with self._lock:
+            self.llm_comment = text
+            self.llm_state = 'ready'
 
     def reset(self):
         with self._lock:
@@ -161,6 +216,8 @@ class GameState:
             self.human_move = None
             self.winner = None
             self._detection_locked = False
+            self.llm_comment = None
+            self.llm_state = 'idle'
             self.history.clear()
         print("[GAME] Scores reset")
 
@@ -178,6 +235,8 @@ class GameState:
                 'winner': self.winner,
                 'detection': self.detection,
                 'confidence': self.confidence,
+                'llmComment': self.llm_comment,
+                'llmState': self.llm_state,
                 'history': list(self.history),
             }
 
@@ -253,6 +312,7 @@ if __name__ == '__main__':
     print('  Rock Paper Scissors — Arduino UNO Q')
     print('=' * 50)
     print(f'[MODE] Brick: {"yes" if _detector else "no"}')
+    print(f'[MODE] LLM: {"yes" if _llm else "no"}')
     print(f'[MODE] App runner: {"yes" if _App else "no"}')
 
     threading.Thread(
