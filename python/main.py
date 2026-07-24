@@ -61,6 +61,9 @@ VALID_LABELS = {'rock', 'paper', 'scissors'}
 PORT = int(os.environ.get('FLASK_PORT', '5001'))
 COUNTDOWN_SECS = 3
 RESULT_HOLD_SECS = 3
+# Per-frame detection logging floods stdout; the App Lab log pipe then applies
+# backpressure that can stall the detection callback thread. Off by default.
+DEBUG_DETECTIONS = os.environ.get('DEBUG_DETECTIONS') == '1'
 
 WINS = {'Rock': 'Scissors', 'Scissors': 'Paper', 'Paper': 'Rock'}
 
@@ -330,23 +333,27 @@ def handle_detections(detections):
     """
     if not detections:
         return
-    print(f"[BRICK-RAW] {detections}")
-    valid = {}
-    for k, v in detections.items():
-        label = k.lower()
-        if label not in VALID_LABELS:
-            continue
-        if isinstance(v, dict):
-            conf = v.get("confidence")
-        elif isinstance(v, list):
-            conf = v[0].get("confidence") if v and isinstance(v[0], dict) else None
-        else:
-            conf = v
-        if conf is not None and conf >= CONFIDENCE_THRESHOLD:
-            valid[label] = conf
-    if valid:
-        best = max(valid, key=valid.get)
-        game.update_detection(best, valid[best])
+    if DEBUG_DETECTIONS:
+        print(f"[BRICK-RAW] {detections}")
+    try:
+        valid = {}
+        for k, v in detections.items():
+            label = k.lower()
+            if label not in VALID_LABELS:
+                continue
+            if isinstance(v, dict):
+                conf = v.get("confidence")
+            elif isinstance(v, list):
+                conf = v[0].get("confidence") if v and isinstance(v[0], dict) else None
+            else:
+                conf = v
+            if conf is not None and conf >= CONFIDENCE_THRESHOLD:
+                valid[label] = conf
+        if valid:
+            best = max(valid, key=valid.get)
+            game.update_detection(best, valid[best])
+    except Exception as e:
+        print(f"[BRICK] detection handler error: {e}")
 
 
 if _detector:

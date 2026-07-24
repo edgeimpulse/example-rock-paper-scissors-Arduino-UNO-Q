@@ -305,5 +305,74 @@ The user asked for a plan and clarifying questions before any coding.
 - Appended Sessions 5 and 6 to `PROMPTS.md`; committed the sidebar/flicker fix
   plus this log and pushed to `mpous/ventuno`.
 
+---
 
+## Session 7 — Fix video object detection stall (stdout backpressure)
 
+**Date:** 2026-07-24
+
+### User prompt
+
+> The inference of the video object detection brick doesn't work really well. I
+> need that video object detection inference to happen all the time and it's not
+> running well. I was not showing scissors in camera anytime and the inference
+> was not running after 2 plays. [on-device logs attached]
+
+### Thinking / diagnosis
+
+- **Symptom from logs:** detection worked for the first round or two, then froze
+  — rounds 2–3 kept reusing a stale `scissors (99%)` reading even though the
+  user's hand was not showing scissors. The camera/brick was clearly still
+  running, but our callback stopped receiving fresh results.
+- **Root cause — stdout pipe backpressure:**
+  - `handle_detections` was printing `[BRICK-RAW] {...}` on *every* frame. With
+    `debounce_sec=0.0` the brick fires dozens of callbacks per second, so this
+    was a print firehose.
+  - Independently, once the local gemma LLM warmed up (~round 2) the commentator
+    worker began emitting long `[LLM] …` lines back-to-back.
+  - Python serializes all `print()` calls through a single `sys.stdout` lock.
+    App Lab consumes stdout over a pipe; when the pipe buffer fills, a write
+    blocks *while holding that lock*. The blocked LLM write then stalled the
+    detection callback thread inside its own `print()`, so it stopped reading
+    the brick's WebSocket — and inference results stopped arriving. The last
+    value (`scissors`) stayed frozen in `GameState`.
+- This also explains why it always looked like "scissors": that was simply the
+  last value latched before the stall, not a live reading.
+
+### Changes made (`python/main.py` only)
+
+- Added `DEBUG_DETECTIONS = os.environ.get('DEBUG_DETECTIONS') == '1'` to the
+  config block (default **off**).
+- Gated the per-frame `[BRICK-RAW]` print behind `DEBUG_DETECTIONS`, removing the
+  firehose from the normal path.
+- Wrapped the detection-parsing body in `try/except Exception` so a malformed
+  frame logs once instead of killing the callback thread.
+
+### Flagged (not code-fixable here)
+
+- **Model accuracy:** the `.eim` model itself appears to over-report `scissors`;
+  that's a training/data issue, not something the app code can fix.
+- **Intentional lock:** detection is deliberately frozen for the duration of a
+  round (~6 s countdown + hold) to snapshot the human's move — so "no updates
+  during a round" is by design, distinct from the stall bug above.
+
+### Outcome / status
+
+- Backpressure fix is deterministic (the firehose is gone by default).
+- **Still not runnable locally** (no Python; bricks are board-only) — needs
+  on-device verification that inference now stays live across many rounds.
+
+---
+
+## Session 8 — Log Session 7, commit and push
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Log everything in PROMPTS.md and commit and push in the ventuno branch.
+
+### Outcome
+
+- Appended Sessions 7 and 8; committed the detection-stall fix
+  (`python/main.py`) plus this log and pushed to `mpous/ventuno`.
