@@ -82,7 +82,8 @@ arduino-app-cli app start user:rock-paper-scissors-game
 
 Once successfully started, navigate to `http://<device-ip>:5001` in your browser and start playing!
 
-<img width="1024" height="1061" alt="Playing Rock Paper Scissors against the Arduino UNO Q" src="https://github.com/user-attachments/assets/cc2b8faf-aec8-4004-b684-1201879231a3" />
+<img width="1024" alt="Playing Rock Paper Scissors against the Arduino UNO Q" src="https://github.com/user-attachments/assets/27faa88b-0311-47c7-9fba-0d31438e45b4" />
+
 
 Good luck!
 
