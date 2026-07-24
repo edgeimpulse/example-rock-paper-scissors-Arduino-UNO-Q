@@ -456,3 +456,86 @@ The user asked for a plan and clarifying questions before any coding.
 
 - Appended Sessions 9 and 10; committed the inference-logging change
   (`python/main.py`) plus this log and pushed to `mpous/ventuno`.
+
+---
+
+## Session 11 — Restore detection speed (throttle LLM) + real-time confidence
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> The object detection inference is not working as expected. It's really slow.
+> Check the initial Python version to learn how the video object detection was
+> working and get back to that initial speed and inferencing results. [pasted the
+> original LLM-free main.py + on-device logs] … I want to see the confidence
+> field there to change it in real-time. I changed in the code to 0.4 but I
+> didn't see any confidence change in the logs.
+
+### Thinking / diagnosis
+
+- **Root cause of the slowdown — the LLM starves detection of CPU.** The logs
+  are decisive: detection ran at `~5.4/s` (interval ~185 ms) until
+  `[Thread-1 (commentator_worker)] LLM: Initializing model
+  llamacpp:gemma-3-1b-it-Q4_0...` fired, after which intervals jumped to
+  `2202ms`, then `27404ms`, collapsing to `~0.3/s`. The original version the
+  user pasted has no LLM at all — which is why it was fast. The gemma model runs
+  locally on the UNO Q CPU and competes with the Edge Impulse detector for the
+  same cores. The old commentator made this worse by firing an LLM generation on
+  **every detection change** and on **each countdown milestone** — i.e. exactly
+  during the window when detection needs the CPU.
+- **Why lowering `CONFIDENCE_THRESHOLD` to 0.4 did nothing visible:** there are
+  two thresholds. The brick was constructed as `VideoObjectDetection(confidence=0.6)`
+  and *overrides the model threshold to 0.6* (`Overriding detection threshold.
+  New confidence: 0.6` in the logs). It filters below 0.6 **before** ever calling
+  our handler, so our separate 0.4 filter could never see anything lower.
+- **Why confidence never appeared to change:** `[DETECT]` only prints when the
+  *label* changes; while it stayed `scissors`, confidence updates were silent.
+
+### Decision (asked the user)
+
+Offered three options; user chose **"Keep LLM, throttle it."**
+
+### Changes made (`python/main.py` only)
+
+- **One confidence knob:** `CONFIDENCE_THRESHOLD = float(os.environ.get('CONFIDENCE', '0.4'))`,
+  moved above the brick init and passed into `VideoObjectDetection(confidence=…)`
+  so the brick and our filter always agree. Now overridable at runtime via the
+  `CONFIDENCE` env var; default lowered to 0.4 as the user wanted.
+- **Throttled the LLM to result-only:** removed the per-detection commentary
+  (`enqueue_detection` in `update_detection`) and the `round_start` /
+  `arduino_choice` countdown milestones. Only the `result` milestone is narrated
+  now — one LLM call per round, during the result hold, when detection accuracy
+  no longer matters. Deleted the now-dead coalescing plumbing
+  (`_pending_detection`, `_pending_lock`, `_wake`, `_next_event`) and the
+  detection/round_start/arduino_choice branches of `_prompt_for`; the worker now
+  blocks on `_milestones.get()`.
+- **Real-time confidence in the logs:** the throttled `[INFER]` heartbeat now
+  includes the current best label + confidence, e.g.
+  `[INFER] result #142  scissors 87%  interval=118ms  avg=121ms  ~8.3/s`, so
+  confidence is visible every second even when the label doesn't change.
+
+### Outcome / status
+
+- Detection should return to the original ~5/s cadence between rounds; the only
+  LLM contention is a single result line per round (brief, by design).
+- Confidence is now both lower-threshold (0.4) and logged live.
+- **Not runnable locally** (no Python; bricks are board-only) — deploy to the
+  UNO Q and confirm `[INFER]` cadence stays high and `[LLM]` fires only at
+  round end.
+
+---
+
+## Session 12 — Log Session 11, commit and push
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Commit push to the ventuno branch. Append all the information into the
+> PROMPTS.md file.
+
+### Outcome
+
+- Appended Sessions 11 and 12; committed the speed/throttle + confidence changes
+  (`python/main.py`) plus this log and pushed to `mpous/ventuno`.

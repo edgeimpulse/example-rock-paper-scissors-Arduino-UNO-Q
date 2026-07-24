@@ -18,12 +18,18 @@ from flask import Flask, render_template, jsonify
 # ─── Silence Flask HTTP logs ─────────────────────────────────────────────
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
+# One confidence knob drives BOTH the brick's internal threshold and our filter
+# so they never disagree. Override at runtime with the CONFIDENCE env var. The
+# brick ignores anything below this before it ever calls us, so lowering it is
+# the only way to see weaker detections in the logs.
+CONFIDENCE_THRESHOLD = float(os.environ.get('CONFIDENCE', '0.4'))
+
 # ─── Video Object Detection Brick ────────────────────────────────────────
 _detector = None
 try:
     from arduino.app_bricks.video_objectdetection import VideoObjectDetection
-    _detector = VideoObjectDetection(confidence=0.6, debounce_sec=0.0)
-    print("[BRICK] VideoObjectDetection initialized")
+    _detector = VideoObjectDetection(confidence=CONFIDENCE_THRESHOLD, debounce_sec=0.0)
+    print(f"[BRICK] VideoObjectDetection initialized (confidence={CONFIDENCE_THRESHOLD})")
 except ImportError:
     print("[WARN] VideoObjectDetection brick not available — detection disabled")
 
@@ -56,7 +62,6 @@ except ImportError:
             pass
 
 # ─── Configuration ───────────────────────────────────────────────────────
-CONFIDENCE_THRESHOLD = 0.6
 VALID_LABELS = {'rock', 'paper', 'scissors'}
 PORT = int(os.environ.get('FLASK_PORT', '5001'))
 COUNTDOWN_SECS = 3
@@ -101,7 +106,6 @@ class GameState:
             changed = label != prev
         if changed:
             print(f"[DETECT] {label} ({confidence:.0%})")
-            enqueue_detection(label, confidence)
 
     def play_round(self):
         arduino_move = random.choice(['Rock', 'Paper', 'Scissors'])
@@ -116,13 +120,8 @@ class GameState:
             self.human_move = None
             self.winner = None
 
-        locked_move = detected.capitalize() if detected and detected in VALID_LABELS else None
-
         print(f"[GAME] Locked detection: {detected} ({conf:.0%})" if detected else
               "[GAME] Locked detection: none")
-
-        enqueue_milestone('round_start', human_move=locked_move)
-        enqueue_milestone('arduino_choice', arduino_move=arduino_move, human_move=locked_move)
 
         for tick in [3, 2, 1]:
             with self._lock:
@@ -231,63 +230,23 @@ game = GameState()
 
 
 # ─── Live Commentator ────────────────────────────────────────────────────
-# A single worker thread turns game events into play-by-play lines. The local
-# LLM is slow, so milestone events (round start, pick, result) are queued and
-# never dropped, while rapid detection changes are coalesced to the latest one.
+# One background worker turns game events into play-by-play lines. The local
+# LLM is CPU-heavy and competes with the Edge Impulse detector for cores, which
+# collapses detection throughput (seconds per frame). So we narrate ONLY the
+# round result — one line per round, generated during the result hold when
+# detection accuracy no longer matters — instead of every detection change or
+# countdown milestone. This keeps live detection running at full speed.
 _milestones = queue.Queue()
-_pending_detection = None
-_pending_lock = threading.Lock()
-_wake = threading.Event()
 
 
 def enqueue_milestone(kind, **data):
     if not _llm:
         return
     _milestones.put({'kind': kind, **data})
-    _wake.set()
-
-
-def enqueue_detection(label, confidence):
-    global _pending_detection
-    if not _llm:
-        return
-    with _pending_lock:
-        _pending_detection = {'kind': 'detection', 'label': label, 'confidence': confidence}
-    _wake.set()
-
-
-def _next_event():
-    """Block until an event is available. Milestones take priority; detection
-    changes are coalesced so only the most recent is narrated."""
-    global _pending_detection
-    while True:
-        try:
-            return _milestones.get_nowait()
-        except queue.Empty:
-            pass
-        with _pending_lock:
-            if _pending_detection is not None:
-                event = _pending_detection
-                _pending_detection = None
-                return event
-        _wake.wait()
-        _wake.clear()
 
 
 def _prompt_for(event):
-    kind = event['kind']
-    if kind == 'detection':
-        if event['label']:
-            return (f"Live: the human is now showing {event['label']} to the camera "
-                    f"({event['confidence']:.0%} confident). Call it like a sportscaster.")
-        return "Live: the human's hand went out of view — nothing detected. React quickly."
-    if kind == 'round_start':
-        hm = event.get('human_move') or 'no clear gesture yet'
-        return f"The round is ON! The human has locked in {hm}. Hype up the showdown."
-    if kind == 'arduino_choice':
-        return (f"Arduino has locked in {event['arduino_move']}! The human is showing "
-                f"{event.get('human_move') or 'nothing clear'}. Call who has the edge and the odds!")
-    if kind == 'result':
+    if event['kind'] == 'result':
         verdict = {
             'human': 'the HUMAN wins the round',
             'arduino': 'the ARDUINO wins the round',
@@ -302,7 +261,7 @@ def _prompt_for(event):
 
 def commentator_worker():
     while True:
-        event = _next_event()
+        event = _milestones.get()
         prompt = _prompt_for(event)
         if not prompt:
             continue
@@ -347,32 +306,10 @@ def handle_detections(detections):
     if not detections:
         return
 
-    global _infer_last_ts, _infer_last_log, _infer_count
-    now = time.perf_counter()
-    with _infer_lock:
-        _infer_count += 1
-        if _infer_last_ts is not None:
-            _infer_intervals.append((now - _infer_last_ts) * 1000.0)
-            del _infer_intervals[100:]
-        _infer_last_ts = now
-        should_log = (now - _infer_last_log) >= 1.0
-        if should_log:
-            _infer_last_log = now
-        count = _infer_count
-        intervals = list(_infer_intervals)
-
-    if should_log:
-        if intervals:
-            last = intervals[-1]
-            avg = sum(intervals) / len(intervals)
-            rate = 1000.0 / avg if avg else 0.0
-            print(f"[INFER] result #{count}  interval={last:.0f}ms  "
-                  f"avg={avg:.0f}ms  ~{rate:.1f}/s")
-        else:
-            print(f"[INFER] result #{count} (first)")
-
     if DEBUG_DETECTIONS:
         print(f"[BRICK-RAW] {detections}")
+
+    best_label, best_conf = None, None
     try:
         valid = {}
         for k, v in detections.items():
@@ -388,10 +325,36 @@ def handle_detections(detections):
             if conf is not None and conf >= CONFIDENCE_THRESHOLD:
                 valid[label] = conf
         if valid:
-            best = max(valid, key=valid.get)
-            game.update_detection(best, valid[best])
+            best_label = max(valid, key=valid.get)
+            best_conf = valid[best_label]
+            game.update_detection(best_label, best_conf)
     except Exception as e:
         print(f"[BRICK] detection handler error: {e}")
+
+    global _infer_last_ts, _infer_last_log, _infer_count
+    now = time.perf_counter()
+    with _infer_lock:
+        _infer_count += 1
+        if _infer_last_ts is not None:
+            _infer_intervals.append((now - _infer_last_ts) * 1000.0)
+            del _infer_intervals[100:]
+        _infer_last_ts = now
+        should_log = (now - _infer_last_log) >= 1.0
+        if should_log:
+            _infer_last_log = now
+        count = _infer_count
+        intervals = list(_infer_intervals)
+
+    if should_log:
+        det = f"{best_label} {best_conf:.0%}" if best_label else "no valid label"
+        if intervals:
+            last = intervals[-1]
+            avg = sum(intervals) / len(intervals)
+            rate = 1000.0 / avg if avg else 0.0
+            print(f"[INFER] result #{count}  {det}  interval={last:.0f}ms  "
+                  f"avg={avg:.0f}ms  ~{rate:.1f}/s")
+        else:
+            print(f"[INFER] result #{count}  {det} (first)")
 
 
 if _detector:
