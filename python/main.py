@@ -9,6 +9,7 @@ Flask on port 5001 serves the custom web UI.
 
 import os
 import time
+import queue
 import random
 import logging
 import threading
@@ -26,16 +27,17 @@ try:
 except ImportError:
     print("[WARN] VideoObjectDetection brick not available — detection disabled")
 
-# ─── LLM Brick (trash-talking commentator) ───────────────────────────────
+# ─── LLM Brick (live play-by-play commentator) ───────────────────────────
 _llm = None
 LLM_PERSONA = (
-    "You are the Arduino UNO Q, a cheeky and competitive robot playing "
-    "Rock Paper Scissors against a human. Reply with a single short, funny, "
-    "playful, PG-rated sentence. Do not use emojis. Do not explain the rules."
+    "You are an energetic live sports commentator narrating a Rock Paper "
+    "Scissors duel between a Human and an Arduino robot. Reply with ONE short, "
+    "punchy, exciting play-by-play line — like calling a football match. "
+    "No emojis. Do not explain the rules. Do not use quotation marks."
 )
 try:
     from arduino.app_bricks.llm import LargeLanguageModel
-    _llm = LargeLanguageModel(system_prompt=LLM_PERSONA, max_tokens=80, temperature=0.9)
+    _llm = LargeLanguageModel(system_prompt=LLM_PERSONA, max_tokens=60, temperature=0.9)
     print("[BRICK] LargeLanguageModel initialized")
 except ImportError:
     print("[WARN] LLM brick not available — commentary disabled")
@@ -81,19 +83,22 @@ class GameState:
         self.detection = None
         self.confidence = 0.0
         self._detection_locked = False
-        self.llm_comment = None
-        self.llm_state = 'idle'
+        self.commentary = []
+        self.commentating = False
         self.history = []
 
     def update_detection(self, label, confidence):
+        changed = False
         with self._lock:
             if self._detection_locked:
                 return
             prev = self.detection
             self.detection = label
             self.confidence = confidence
-        if label != prev:
+            changed = label != prev
+        if changed:
             print(f"[DETECT] {label} ({confidence:.0%})")
+            enqueue_detection(label, confidence)
 
     def play_round(self):
         arduino_move = random.choice(['Rock', 'Paper', 'Scissors'])
@@ -107,11 +112,14 @@ class GameState:
             self.arduino_move = arduino_move
             self.human_move = None
             self.winner = None
-            self.llm_comment = None
-            self.llm_state = 'idle'
+
+        locked_move = detected.capitalize() if detected and detected in VALID_LABELS else None
 
         print(f"[GAME] Locked detection: {detected} ({conf:.0%})" if detected else
               "[GAME] Locked detection: none")
+
+        enqueue_milestone('round_start', human_move=locked_move)
+        enqueue_milestone('arduino_choice', arduino_move=arduino_move, human_move=locked_move)
 
         for tick in [3, 2, 1]:
             with self._lock:
@@ -159,7 +167,8 @@ class GameState:
         print(f"[GAME] Round {round_record['round']}: "
               f"Human={human_move or '?'} vs Arduino={arduino_move} -> {winner}")
 
-        self._generate_comment(winner, human_move, arduino_move)
+        enqueue_milestone('result', winner=winner, human_move=human_move,
+                          arduino_move=arduino_move)
 
         time.sleep(RESULT_HOLD_SECS)
 
@@ -169,40 +178,14 @@ class GameState:
 
         return round_record
 
-    def _generate_comment(self, winner, human_move, arduino_move):
-        """Ask the LLM for a witty line about the round. No-op if brick absent."""
-        if not _llm:
-            return
-
-        if winner == 'human':
-            prompt = (f"You just LOST: the human played {human_move} and beat your "
-                      f"{arduino_move}. Make a funny, dramatic excuse for why you lost.")
-        elif winner == 'arduino':
-            prompt = (f"You just WON: your {arduino_move} beat the human's {human_move}. "
-                      f"Tease the human in a funny, playful way.")
-        elif winner == 'draw':
-            prompt = (f"It's a draw — you both played {arduino_move}. "
-                      f"Make a funny remark about the tie.")
-        else:
-            prompt = ("The human failed to show a clear hand gesture in time. "
-                      "Playfully tell them to show their hand properly next round.")
-
+    def add_commentary(self, text):
         with self._lock:
-            self.llm_state = 'thinking'
-            self.llm_comment = None
+            self.commentary.insert(0, text)
+            del self.commentary[10:]
 
-        try:
-            text = _llm.chat(prompt).strip()
-        except Exception as e:
-            print(f"[LLM] generation failed: {e}")
-            with self._lock:
-                self.llm_state = 'idle'
-            return
-
-        print(f"[LLM] {text}")
+    def set_commentating(self, value):
         with self._lock:
-            self.llm_comment = text
-            self.llm_state = 'ready'
+            self.commentating = value
 
     def reset(self):
         with self._lock:
@@ -216,8 +199,8 @@ class GameState:
             self.human_move = None
             self.winner = None
             self._detection_locked = False
-            self.llm_comment = None
-            self.llm_state = 'idle'
+            self.commentary.clear()
+            self.commentating = False
             self.history.clear()
         print("[GAME] Scores reset")
 
@@ -235,13 +218,106 @@ class GameState:
                 'winner': self.winner,
                 'detection': self.detection,
                 'confidence': self.confidence,
-                'llmComment': self.llm_comment,
-                'llmState': self.llm_state,
+                'commentary': list(self.commentary),
+                'commentating': self.commentating,
                 'history': list(self.history),
             }
 
 
 game = GameState()
+
+
+# ─── Live Commentator ────────────────────────────────────────────────────
+# A single worker thread turns game events into play-by-play lines. The local
+# LLM is slow, so milestone events (round start, pick, result) are queued and
+# never dropped, while rapid detection changes are coalesced to the latest one.
+_milestones = queue.Queue()
+_pending_detection = None
+_pending_lock = threading.Lock()
+_wake = threading.Event()
+
+
+def enqueue_milestone(kind, **data):
+    if not _llm:
+        return
+    _milestones.put({'kind': kind, **data})
+    _wake.set()
+
+
+def enqueue_detection(label, confidence):
+    global _pending_detection
+    if not _llm:
+        return
+    with _pending_lock:
+        _pending_detection = {'kind': 'detection', 'label': label, 'confidence': confidence}
+    _wake.set()
+
+
+def _next_event():
+    """Block until an event is available. Milestones take priority; detection
+    changes are coalesced so only the most recent is narrated."""
+    global _pending_detection
+    while True:
+        try:
+            return _milestones.get_nowait()
+        except queue.Empty:
+            pass
+        with _pending_lock:
+            if _pending_detection is not None:
+                event = _pending_detection
+                _pending_detection = None
+                return event
+        _wake.wait()
+        _wake.clear()
+
+
+def _prompt_for(event):
+    kind = event['kind']
+    if kind == 'detection':
+        if event['label']:
+            return (f"Live: the human is now showing {event['label']} to the camera "
+                    f"({event['confidence']:.0%} confident). Call it like a sportscaster.")
+        return "Live: the human's hand went out of view — nothing detected. React quickly."
+    if kind == 'round_start':
+        hm = event.get('human_move') or 'no clear gesture yet'
+        return f"The round is ON! The human has locked in {hm}. Hype up the showdown."
+    if kind == 'arduino_choice':
+        return (f"Arduino has locked in {event['arduino_move']}! The human is showing "
+                f"{event.get('human_move') or 'nothing clear'}. Call who has the edge and the odds!")
+    if kind == 'result':
+        verdict = {
+            'human': 'the HUMAN wins the round',
+            'arduino': 'the ARDUINO wins the round',
+            'draw': "it's a DRAW",
+            'no_detection': 'no valid move from the human — no contest',
+        }.get(event['winner'], event['winner'])
+        return (f"FINAL WHISTLE: {verdict}! Human played "
+                f"{event.get('human_move') or '—'}, Arduino played {event['arduino_move']}. "
+                f"Give the dramatic verdict.")
+    return None
+
+
+def commentator_worker():
+    while True:
+        event = _next_event()
+        prompt = _prompt_for(event)
+        if not prompt:
+            continue
+        game.set_commentating(True)
+        try:
+            text = _llm.chat(prompt).strip()
+        except Exception as e:
+            print(f"[LLM] commentary failed: {e}")
+            game.set_commentating(False)
+            continue
+        game.set_commentating(False)
+        if text:
+            print(f"[LLM] {text}")
+            game.add_commentary(text)
+
+
+if _llm:
+    threading.Thread(target=commentator_worker, daemon=True).start()
 
 
 # ─── Brick Detection Callback ────────────────────────────────────────────
