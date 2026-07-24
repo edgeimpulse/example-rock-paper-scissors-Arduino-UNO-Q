@@ -67,7 +67,7 @@ Download the model that you would like to have. In this case, I downloaded the `
 
 And check that it's being added in the `app.yaml` file of the app.
 
-<img width="1024" height="1162" alt="app.yaml file with the models deployed" src="https://github.com/user-attachments/assets/0c7e02ff-d97a-4980-91a1-811cc7ac6bdb" />
+<img width="1024" alt="app.yaml file with the models deployed" src="https://github.com/user-attachments/assets/0c7e02ff-d97a-4980-91a1-811cc7ac6bdb" />
 
 
 ### Step 3: Start the app
