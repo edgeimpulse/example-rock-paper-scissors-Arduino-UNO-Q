@@ -1,36 +1,38 @@
-# Rock Paper Scissors Game with Arduino UNO Q
+# Rock Paper Scissors Game with Arduino VENTUNO Q
 
 A real-time Rock-Paper-Scissors game running on the Arduino UNO Q using an Edge Impulse object detection model.
 
-<img width="1624" height="1056" alt="Playing Rock Paper Scissors against Arduino UNO Q" src="https://github.com/user-attachments/assets/4a424e48-33d7-4b16-a3ca-eb47b1708bb3" />
+<img width="1024" alt="Playing Rock Paper Scissors against the Arduino VENTUNO Q" src="https://github.com/user-attachments/assets/f910e8b2-b569-4578-bdeb-da92f85905f7" />
 
-The camera detects your hand gesture (rock, paper, or scissors) via machine learning inference, while the Arduino picks a random move. Are you going to win the Arduino UNO Q?
+The camera detects your hand gesture (rock, paper, or scissors) via object detection inference, while the Arduino picks a random move, and the local LLM comments the game. Are you going to win the Arduino?
 
 
 ## Deployment
 
 ### Prerequisites
 
-- Arduino UNO Q with Arduino App Lab
+- Arduino VENTUNO Q with Arduino App Lab
 - USB camera connected to the board
 - [Edge Impulse](https://edgeimpulse.com/) machine learning model trained to detect `rock`, `paper`, and `scissors` as you can find in this public project [here](https://studio.edgeimpulse.com/public/903134/live). Clone it and re-train it to improve the accuracy with your light and background.
 
 ### Step 1: Transfer the app
 
-Clone [this repository](https://github.com/edgeimpulse/example-rock-paper-scissors-Arduino-UNO-Q) to your local machine.
+Clone [this repository](https://github.com/mpous/example-rock-paper-scissors-Arduino-VENTUNO-Q) to your local machine.
+
+Or `Download as a ZIP file` from the Github repository.
 
 Copy the entire `Rock Paper Scissors` folder to the Arduino UNO Q board:
 
 ```bash
-scp -r Rock-Paper-Scissors-Arduino-UNO-Q/ arduino@<device-ip>:/home/arduino/ArduinoApps/RPS-game
+scp -r Rock-Paper-Scissors-Arduino-VENTUNO-Q/ arduino@<device-ip>:/home/arduino/ArduinoApps/RPS-game
 ```
 
-or use the Arduino App Lab `Create new App` button in the `My Apps` section and import the application.
+or use the Arduino App Lab `Create new App` button in the `My Apps` section and import the ZIP file.
 
 ![Create new app](assets/img/arduino-app-lab-create-new-app.png)
 
 
-### Step 2: Deploy the model
+### Step 2: Deploy the Object Detection model
 
 Get into the `Rock Paper Scissor` app into the Arduino App Lab.
 
@@ -48,22 +50,29 @@ Log In into your Arduino account and the Edge Impulse account and then train you
 
 ![Train the model](assets/img/train-the-model.png)
 
-Go to deploy the model as `Arduino UNO Q` or as `Linux aarch64`. 
+Go to deploy the model as `Arduino VENTUNO Q` or as `Linux AARCH64 with Qualcomm QNN`. 
 
 ![Deploy the model as Arduino UNO Q or Linux aarch64](assets/img/edge-impulse-project.png)
 
 Then the deployed models will appear in the brick of the Arduino App Lab when you will go to the `AI models` tab. Select the `Rock paper scissors` model.
 
+
+### Step 2.1: Deploy the local LLM 
+
+Select the brick `Large Language Model LLM` and then go to the tab `AI models`. 
+
+<img width="1024" alt="Install LLM Gemma 3 1B to the application" src="https://github.com/user-attachments/assets/b1a42a5d-bdaf-4aed-b7ef-f2cdfc201d32" />
+
+Download the model that you would like to have. In this case, I downloaded the `Gemma 3 1B` and it works well.
+
 And check that it's being added in the `app.yaml` file of the app.
 
-![app.yaml file with the custom model](assets/img/app-yaml-with-custom-model.png)
+<img width="1024" alt="app.yaml file with the models deployed" src="https://github.com/user-attachments/assets/0c7e02ff-d97a-4980-91a1-811cc7ac6bdb" />
 
 
 ### Step 3: Start the app
 
-Launch the Arduino App Lab in your local machine and get into your Arduino UNO Q.
-
-Go to `My Apps` and you may see the `Rock Paper Scissors` application there. Click on it and then click `Run`.
+Click on the `Rock Paper Scissors` application and then click `Run`.
 
 Alternatively, via SSH you can start the application using the Arduino App Lab CLI.
 
