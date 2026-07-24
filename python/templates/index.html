@@ -185,52 +185,78 @@
         .result-banner.draw    { background: #fef3c7; color: #92400e; }
         .result-banner.error   { background: #fce4ec; color: #880e4f; }
 
-        /* ── Arduino says (LLM commentary) ── */
-        .llm-bubble {
-            position: relative;
-            max-width: 928px;
-            margin: 12px auto 0;
-            padding: 14px 18px;
-            background: #f4f4f5;
-            border: 1px solid #e4e4e7;
+        /* ── Live Commentary feed ── */
+        .commentary {
+            max-width: 960px;
+            margin: 16px auto 0;
+            padding: 14px 16px;
+            border: 2px solid #f0f0f0;
             border-radius: 12px;
-            display: none;
+            background: #fafafa;
         }
-        .llm-bubble.show { display: block; }
-        .llm-bubble::before {
-            content: '';
-            position: absolute;
-            top: -8px;
-            left: 28px;
-            width: 14px;
-            height: 14px;
-            background: #f4f4f5;
-            border-left: 1px solid #e4e4e7;
-            border-top: 1px solid #e4e4e7;
-            transform: rotate(45deg);
+        .commentary-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
         }
-        .llm-speaker {
-            font-size: 11px;
+        .commentary-head h2 {
+            font-size: 12px;
             text-transform: uppercase;
             letter-spacing: 1.5px;
             color: #999;
-            margin-bottom: 6px;
+            font-weight: 600;
         }
-        .llm-text {
+        .on-air {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            color: #dc2626;
+            text-transform: uppercase;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .on-air.live { opacity: 1; }
+        .on-air .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #dc2626;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.3; transform: scale(0.7); }
+        }
+        .commentary-feed {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .commentary-feed li {
             font-size: 15px;
-            line-height: 1.45;
+            line-height: 1.4;
             color: #27272a;
-            font-style: italic;
+            padding: 8px 12px;
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            border-left: 3px solid #dc2626;
+            animation: slidein 0.25s ease-out;
         }
-        .llm-dots span {
-            display: inline-block;
-            animation: blink 1.4s infinite both;
+        .commentary-feed li.latest { border-left-color: #16a34a; font-weight: 600; }
+        @keyframes slidein {
+            from { opacity: 0; transform: translateY(-4px); }
+            to   { opacity: 1; transform: translateY(0); }
         }
-        .llm-dots span:nth-child(2) { animation-delay: 0.2s; }
-        .llm-dots span:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes blink {
-            0%, 80%, 100% { opacity: 0.2; }
-            40% { opacity: 1; }
+        .commentary-empty {
+            font-size: 13px;
+            color: #ccc;
+            padding: 6px 2px;
         }
 
         /* ── Controls ── */
@@ -374,10 +400,14 @@
     <!-- Result Banner -->
     <div class="result-banner" id="resultBanner"></div>
 
-    <!-- Arduino commentary (LLM) -->
-    <div class="llm-bubble" id="llmBubble">
-        <div class="llm-speaker">Arduino says</div>
-        <div class="llm-text" id="llmText"></div>
+    <!-- Live Commentary (LLM) -->
+    <div class="commentary">
+        <div class="commentary-head">
+            <h2>Live Commentary</h2>
+            <span class="on-air" id="onAir"><span class="dot"></span>On Air</span>
+        </div>
+        <ul class="commentary-feed" id="commentaryFeed"></ul>
+        <div class="commentary-empty" id="commentaryEmpty">Waiting for kickoff&hellip;</div>
     </div>
 
     <!-- Controls -->
@@ -520,26 +550,35 @@ function update(s) {
 
     prevState = s.state;
 
-    /* ── Arduino commentary ── */
-    updateLlm(s.llmState, s.llmComment);
+    /* ── Live commentary ── */
+    updateCommentary(s.commentary, s.commentating);
 
     /* ── History ── */
     updateHistory(s.history);
 }
 
-function updateLlm(state, comment) {
-    var bubble = document.getElementById('llmBubble');
-    var text = document.getElementById('llmText');
-    if (state === 'thinking') {
-        bubble.className = 'llm-bubble show';
-        text.innerHTML = '<span class="llm-dots"><span>.</span><span>.</span><span>.</span></span>';
-    } else if (state === 'ready' && comment) {
-        bubble.className = 'llm-bubble show';
-        text.textContent = comment;
-    } else {
-        bubble.className = 'llm-bubble';
-        text.textContent = '';
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function updateCommentary(lines, commentating) {
+    document.getElementById('onAir').className = commentating ? 'on-air live' : 'on-air';
+
+    var feed = document.getElementById('commentaryFeed');
+    var empty = document.getElementById('commentaryEmpty');
+    if (!lines || lines.length === 0) {
+        feed.innerHTML = '';
+        empty.style.display = 'block';
+        return;
     }
+    empty.style.display = 'none';
+    var html = '';
+    for (var i = 0; i < lines.length; i++) {
+        html += '<li' + (i === 0 ? ' class="latest"' : '') + '>' +
+                escapeHtml(lines[i]) + '</li>';
+    }
+    feed.innerHTML = html;
 }
 
 function showBanner(text, cls) {
@@ -582,7 +621,6 @@ function updateHistory(history) {
 function playRound() {
     document.getElementById('playBtn').disabled = true;
     hideBanner();
-    document.getElementById('llmBubble').className = 'llm-bubble';
     fetch('/api/play', { method: 'POST' })
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -605,7 +643,8 @@ function resetGame() {
             document.getElementById('moveEmoji').textContent = '\u2753';
             document.getElementById('moveName').textContent = 'waiting';
             hideBanner();
-            document.getElementById('llmBubble').className = 'llm-bubble';
+            document.getElementById('commentaryFeed').innerHTML = '';
+            document.getElementById('commentaryEmpty').style.display = 'block';
         });
 }
 

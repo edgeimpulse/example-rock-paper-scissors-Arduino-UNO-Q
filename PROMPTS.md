@@ -114,3 +114,124 @@ The user asked for a plan and clarifying questions before any coding.
   result screen holds longer while it "thinks" — expected with the blocking
   approach the user chose. The LLM brick also needs a model downloaded locally
   on the board.
+
+---
+
+## Session 2 — Push to a personal fork on a new branch
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> I want to create a branch called `ventuno` and push this code to this repo
+> https://github.com/mpous/example-rock-paper-scissors-Arduino-UNO-Q
+
+### Thinking / notes
+
+- `origin` pointed at `edgeimpulse/…`, not the user's `mpous/…` repo, so a new
+  remote was needed rather than pushing to `origin`.
+- `.claude/settings.local.json` is local Claude Code config — deliberately left
+  uncommitted. No `.gitignore` existed.
+
+### Outcome
+
+- Created branch `ventuno`; committed the Session 1 changes + `PROMPTS.md`.
+- Added remote `mpous` → the personal repo (left `origin` untouched).
+- Pushed `ventuno` → `mpous/ventuno` with upstream tracking.
+- Note: commit authored as `Marc Pous <mpous@qti.qualcomm.com>` (git's
+  auto-detected identity).
+
+---
+
+## Session 3 — Turn the LLM into a live play-by-play commentator
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> This worked well. The only thing I want to change now is that the LLM from the
+> brick becomes a *commenter*: commenting on every change of the rock-paper-
+> scissors detector, then when clicking the button, commenting the result,
+> commenting when the Arduino chooses and the chances to win. I want it to be a
+> real-time commenter, like a football game.
+
+### Thinking / design notes
+
+- **Core tension:** the local LLM is slow (seconds per line), but the desired UX
+  is a continuous, real-time sports-commentary stream driven by frequent events
+  (every detector change + several per-round milestones). Naively calling the
+  LLM on every event would back up badly.
+- **Chosen architecture:** a single background **commentator worker** thread
+  that pulls from two sources with different drop policies:
+  - **Milestones** (`round_start`, `arduino_choice`, `result`) → a real
+    `queue.Queue`, never dropped, always narrated in order.
+  - **Detection changes** → a single-slot "latest wins" pending value
+    (coalesced), so rapid flicker doesn't create a backlog — only the most
+    recent gesture gets narrated when the worker is free.
+  - `_next_event()` drains milestones first, then the latest detection, then
+    blocks on a `threading.Event` until woken.
+- This naturally rate-limits to the model's speed while keeping the feed current
+  and guaranteeing key game moments are always covered.
+
+### Changes made
+
+**`python/main.py`**
+- Rewrote the LLM persona from a cheeky trash-talker into an "energetic live
+  sports commentator" (one punchy play-by-play line, no emojis); `max_tokens`
+  lowered to 60.
+- Replaced `GameState.llm_comment` / `llm_state` with a `commentary` feed (list,
+  newest first, capped at 10) and a `commentating` flag; added `add_commentary`
+  and `set_commentating`; exposed `commentary` / `commentating` in `to_dict`;
+  cleared them in `reset`.
+- `update_detection` now fires `enqueue_detection(...)` on every label change.
+- `play_round` emits `round_start` and `arduino_choice` milestones right after
+  locking the gesture / picking the Arduino move, and a `result` milestone after
+  the winner is computed. Removed the old one-shot `_generate_comment`.
+- Added the commentator infrastructure (`_milestones` queue, coalesced
+  `_pending_detection`, `_wake` event, `enqueue_*`, `_next_event`, `_prompt_for`
+  per event kind, and `commentator_worker`), started as a daemon thread when the
+  LLM brick is present.
+
+**`python/templates/index.html`**
+- Replaced the single "Arduino says" bubble with a **Live Commentary** feed: a
+  panel with an "On Air" pulsing indicator (driven by `commentating`) and a list
+  of recent lines (newest highlighted, HTML-escaped, slide-in animation).
+- Swapped `updateLlm` for `updateCommentary(lines, commentating)`; cleared the
+  feed on reset.
+
+### Outcome / status
+
+- Code complete and internally consistent; no lingering references to the old
+  single-comment fields.
+- **Still not runnable locally** (no Python; bricks are board-only). Deploy to
+  the UNO Q to test; watch `[LLM]` / `[DETECT]` lines in the app logs.
+- **Known tradeoff (flagged to user):** because milestones are never dropped,
+  playing rounds faster than the LLM can generate will make commentary lag
+  behind live action, and the "odds" line for a pick may land after the result
+  is already on screen. Acceptable for a ticker-style feed; could be tuned later
+  (e.g. drop stale milestones, or lengthen countdown/hold).
+
+---
+
+## Session 4 — Commit the commentator work to the dev branch
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Append the new prompts and outcomes in the PROMPTS.md file and add, commit and
+> push into the dev branch.
+
+### Notes
+
+- "Dev branch" interpreted as `ventuno` — the only non-`main` branch and the one
+  all this work has been developed on.
+- Staged the Session 3 code changes (`python/main.py`,
+  `python/templates/index.html`) plus this `PROMPTS.md` update; `.claude/`
+  remains uncommitted (local Claude config).
+
+### Outcome
+
+- Committed the live-commentator changes and pushed to `mpous/ventuno`.
+
+
