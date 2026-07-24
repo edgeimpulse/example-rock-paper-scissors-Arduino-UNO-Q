@@ -324,15 +324,53 @@ if _llm:
 
 
 # ─── Brick Detection Callback ────────────────────────────────────────────
+# The brick fires on_detect_all only when it has at least one detection — empty
+# frames trigger no callback and the brick exposes no inference-time field. So
+# we time the interval between callbacks ourselves as an effective inference
+# cadence, and log a throttled heartbeat (once/sec) that proves inference is
+# live without re-creating the per-frame print firehose that stalled stdout.
+_infer_last_ts = None
+_infer_last_log = 0.0
+_infer_count = 0
+_infer_intervals = []
+_infer_lock = threading.Lock()
+
+
 def handle_detections(detections):
     """Called by the video_object_detection brick with detection results.
 
     The brick may pass either:
       - {label: {"confidence": float}} (dict values)
       - {label: float}                 (plain float values)
+      - {label: [ {"confidence": float, ...}, ... ]} (list of detail dicts)
     """
     if not detections:
         return
+
+    global _infer_last_ts, _infer_last_log, _infer_count
+    now = time.perf_counter()
+    with _infer_lock:
+        _infer_count += 1
+        if _infer_last_ts is not None:
+            _infer_intervals.append((now - _infer_last_ts) * 1000.0)
+            del _infer_intervals[100:]
+        _infer_last_ts = now
+        should_log = (now - _infer_last_log) >= 1.0
+        if should_log:
+            _infer_last_log = now
+        count = _infer_count
+        intervals = list(_infer_intervals)
+
+    if should_log:
+        if intervals:
+            last = intervals[-1]
+            avg = sum(intervals) / len(intervals)
+            rate = 1000.0 / avg if avg else 0.0
+            print(f"[INFER] result #{count}  interval={last:.0f}ms  "
+                  f"avg={avg:.0f}ms  ~{rate:.1f}/s")
+        else:
+            print(f"[INFER] result #{count} (first)")
+
     if DEBUG_DETECTIONS:
         print(f"[BRICK-RAW] {detections}")
     try:
