@@ -8,6 +8,7 @@ Flask on port 5001 serves the custom web UI.
 """
 
 import os
+import sys
 import time
 import queue
 import random
@@ -17,6 +18,43 @@ from flask import Flask, render_template, jsonify
 
 # ─── Silence Flask HTTP logs ─────────────────────────────────────────────
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+# ─── Non-blocking logging ────────────────────────────────────────────────
+# Every detection stall we have hit traces back to a worker thread blocking
+# while writing to stdout when the App Lab log pipe fills: a blocked write holds
+# shared sys.stdout lock, which freezes every other thread — including the
+# detector callback, which then stops servicing its WebSocket and detection
+# dies (low CPU, app appears hung, restart doesn't help). So route ALL app
+# logging through a bounded queue drained by one writer thread. Producer
+# threads never block: if the queue is full (stdout wedged) we DROP the line
+# rather than stall real work. Losing a log line is fine; stalling detection is
+# not.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+_log_queue = queue.Queue(maxsize=2000)
+
+
+def log(msg):
+    try:
+        _log_queue.put_nowait(msg)
+    except queue.Full:
+        pass
+
+
+def _log_writer():
+    while True:
+        msg = _log_queue.get()
+        try:
+            sys.stdout.write(msg + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+threading.Thread(target=_log_writer, daemon=True).start()
 
 # One confidence knob drives BOTH the brick's internal threshold and our filter
 # so they never disagree. Override at runtime with the CONFIDENCE env var. The
@@ -29,9 +67,9 @@ _detector = None
 try:
     from arduino.app_bricks.video_objectdetection import VideoObjectDetection
     _detector = VideoObjectDetection(confidence=CONFIDENCE_THRESHOLD, debounce_sec=0.0)
-    print(f"[BRICK] VideoObjectDetection initialized (confidence={CONFIDENCE_THRESHOLD})")
+    log(f"[BRICK] VideoObjectDetection initialized (confidence={CONFIDENCE_THRESHOLD})")
 except ImportError:
-    print("[WARN] VideoObjectDetection brick not available — detection disabled")
+    log("[WARN] VideoObjectDetection brick not available — detection disabled")
 
 # ─── LLM Brick (live play-by-play commentator) ───────────────────────────
 _llm = None
@@ -44,9 +82,9 @@ LLM_PERSONA = (
 try:
     from arduino.app_bricks.llm import LargeLanguageModel
     _llm = LargeLanguageModel(system_prompt=LLM_PERSONA, max_tokens=60, temperature=0.9)
-    print("[BRICK] LargeLanguageModel initialized")
+    log("[BRICK] LargeLanguageModel initialized")
 except ImportError:
-    print("[WARN] LLM brick not available — commentary disabled")
+    log("[WARN] LLM brick not available — commentary disabled")
 
 # ─── App Runner ──────────────────────────────────────────────────────────
 _App = None
@@ -105,7 +143,7 @@ class GameState:
             self.confidence = confidence
             changed = label != prev
         if changed:
-            print(f"[DETECT] {label} ({confidence:.0%})")
+            log(f"[DETECT] {label} ({confidence:.0%})")
 
     def play_round(self):
         arduino_move = random.choice(['Rock', 'Paper', 'Scissors'])
@@ -120,7 +158,7 @@ class GameState:
             self.human_move = None
             self.winner = None
 
-        print(f"[GAME] Locked detection: {detected} ({conf:.0%})" if detected else
+        log(f"[GAME] Locked detection: {detected} ({conf:.0%})" if detected else
               "[GAME] Locked detection: none")
 
         for tick in [3, 2, 1]:
@@ -166,7 +204,7 @@ class GameState:
             self.history.insert(0, round_record)
             self.state = 'result'
 
-        print(f"[GAME] Round {round_record['round']}: "
+        log(f"[GAME] Round {round_record['round']}: "
               f"Human={human_move or '?'} vs Arduino={arduino_move} -> {winner}")
 
         enqueue_milestone('result', winner=winner, human_move=human_move,
@@ -204,7 +242,7 @@ class GameState:
             self.commentary.clear()
             self.commentating = False
             self.history.clear()
-        print("[GAME] Scores reset")
+        log("[GAME] Scores reset")
 
     def to_dict(self):
         with self._lock:
@@ -269,12 +307,12 @@ def commentator_worker():
         try:
             text = _llm.chat(prompt).strip()
         except Exception as e:
-            print(f"[LLM] commentary failed: {e}")
+            log(f"[LLM] commentary failed: {e}")
             game.set_commentating(False)
             continue
         game.set_commentating(False)
         if text:
-            print(f"[LLM] {text}")
+            log(f"[LLM] {text}")
             game.add_commentary(text)
 
 
@@ -307,7 +345,7 @@ def handle_detections(detections):
         return
 
     if DEBUG_DETECTIONS:
-        print(f"[BRICK-RAW] {detections}")
+        log(f"[BRICK-RAW] {detections}")
 
     best_label, best_conf = None, None
     try:
@@ -329,7 +367,7 @@ def handle_detections(detections):
             best_conf = valid[best_label]
             game.update_detection(best_label, best_conf)
     except Exception as e:
-        print(f"[BRICK] detection handler error: {e}")
+        log(f"[BRICK] detection handler error: {e}")
 
     global _infer_last_ts, _infer_last_log, _infer_count
     now = time.perf_counter()
@@ -351,10 +389,10 @@ def handle_detections(detections):
             last = intervals[-1]
             avg = sum(intervals) / len(intervals)
             rate = 1000.0 / avg if avg else 0.0
-            print(f"[INFER] result #{count}  {det}  interval={last:.0f}ms  "
+            log(f"[INFER] result #{count}  {det}  interval={last:.0f}ms  "
                   f"avg={avg:.0f}ms  ~{rate:.1f}/s")
         else:
-            print(f"[INFER] result #{count}  {det} (first)")
+            log(f"[INFER] result #{count}  {det} (first)")
 
 
 if _detector:
@@ -392,12 +430,12 @@ def api_reset():
 
 # ─── Entry Point ─────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    print('=' * 50)
-    print('  Rock Paper Scissors — Arduino UNO Q')
-    print('=' * 50)
-    print(f'[MODE] Brick: {"yes" if _detector else "no"}')
-    print(f'[MODE] LLM: {"yes" if _llm else "no"}')
-    print(f'[MODE] App runner: {"yes" if _App else "no"}')
+    log('=' * 50)
+    log('  Rock Paper Scissors — Arduino UNO Q')
+    log('=' * 50)
+    log(f'[MODE] Brick: {"yes" if _detector else "no"}')
+    log(f'[MODE] LLM: {"yes" if _llm else "no"}')
+    log(f'[MODE] App runner: {"yes" if _App else "no"}')
 
     threading.Thread(
         target=lambda: app.run(
@@ -405,14 +443,14 @@ if __name__ == '__main__':
         ),
         daemon=True
     ).start()
-    print(f'[WEB] http://0.0.0.0:{PORT}')
+    log(f'[WEB] http://0.0.0.0:{PORT}')
 
     if _App:
         _App.run()
     else:
-        print('[INFO] Running standalone (no App runner)')
+        log('[INFO] Running standalone (no App runner)')
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            print('\n[EXIT] Shutting down')
+            log('\n[EXIT] Shutting down')

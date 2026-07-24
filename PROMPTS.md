@@ -539,3 +539,81 @@ Offered three options; user chose **"Keep LLM, throttle it."**
 
 - Appended Sessions 11 and 12; committed the speed/throttle + confidence changes
   (`python/main.py`) plus this log and pushed to `mpous/ventuno`.
+
+---
+
+## Session 13 — Kill the recurring stdout hang with non-blocking logging
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Let me share more logs. After the result 136 the application stopped. Having
+> said that I never showed the inferenced result. [full on-device log] … Checked
+> CPU, memory, etc: STORAGE 21.81/54.89GB, RAM 2.38/14.93GB, NPU 1%, CPU 11%. I
+> stopped the app and clicked Run again and the application didn't improve.
+
+### Thinking / diagnosis
+
+- **Good news first:** the Session 11 confidence work is confirmed working — the
+  logs now show live confidence (`scissors 46%`, `54%`, `66%`, `rock 94%`,
+  `paper 85%`, …) and the brick threshold is 0.4 (`Overriding detection
+  threshold. New confidence: 0.4`).
+- **The hang is NOT resource starvation.** CPU 11%, RAM 2.4/15 GB, NPU 1% — the
+  board is essentially idle while the app is frozen, and a restart doesn't help.
+  An idle-but-stuck process means a **blocked thread**, not exhaustion.
+- **The frozen-timing tell:** from `[INFER] result #101` through `#136` the
+  timing fields are byte-identical (`interval=1617ms  avg=1334ms  ~0.7/s`) even
+  though the count and label/confidence keep changing. The timing state stopped
+  advancing — i.e. the process was winding down / threads stalling while the
+  last buffered lines dribbled out.
+- **Root cause — same disease as Sessions 7 and 11, now proven recurrent:** a
+  worker thread blocks while writing to stdout when the App Lab log pipe fills.
+  A blocked write holds Python's shared `sys.stdout` lock, which then freezes
+  every other thread that logs — including the detector callback thread, which
+  stops servicing its WebSocket, so detection dies. Low CPU because everyone is
+  blocked on I/O, not spinning. Restart doesn't help if the log consumer stays
+  wedged. Gating individual prints (Session 7) and reducing volume (Session 11)
+  only *delayed* it; the fix has to remove blocking from the worker threads
+  entirely.
+- Aside: the first result still caused a one-time ~30 s detection stall
+  (`interval=30020ms`) right when the LLM logged `Initializing model
+  llamacpp...` — that's the model warm-up pegging the CPU on first use, a
+  one-off, distinct from the stdout hang.
+
+### Changes made (`python/main.py` only)
+
+- Added a **non-blocking logging layer**: a bounded `queue.Queue(maxsize=2000)`
+  plus a single daemon `_log_writer` thread that owns all `sys.stdout` writes.
+  A new `log(msg)` helper does `put_nowait` and **drops the line on `queue.Full`**
+  instead of blocking. So no producer thread (detector callback, game logic, LLM
+  worker, Flask) can ever be stalled by a wedged stdout pipe — detection keeps
+  running even if logs stop. Losing a log line is acceptable; stalling detection
+  is not.
+- Set `sys.stdout.reconfigure(line_buffering=True)` (best-effort) so lines flush
+  promptly and appear live in the App Lab log view.
+- Converted **every** `print(...)` in the app to `log(...)`.
+
+### Outcome / status
+
+- Removes the blocking path that has stalled detection three times. Detection
+  liveness is now decoupled from log I/O.
+- **Not runnable locally** (no Python; bricks are board-only) — verified by
+  inspection (`log()` defined before first use; all call sites converted).
+  Deploy to the UNO Q and confirm `[INFER]` keeps ticking indefinitely across
+  many rounds without freezing.
+
+---
+
+## Session 14 — Log Session 13, commit and push
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Log everything and commit + push to the ventuno branch.
+
+### Outcome
+
+- Appended Sessions 13 and 14; committed the non-blocking logging change
+  (`python/main.py`) plus this log and pushed to `mpous/ventuno`.
