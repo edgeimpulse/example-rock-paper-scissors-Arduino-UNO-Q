@@ -2,7 +2,7 @@
 
 A real-time Rock-Paper-Scissors game running on the Arduino UNO Q using an Edge Impulse object detection model.
 
-<img width="1024" alt="Playing Rock Paper Scissors against the Arduino VENTUNO Q" src="https://github.com/user-attachments/assets/f910e8b2-b569-4578-bdeb-da92f85905f7" />
+<img width="1024" alt="Playing agains the Arduino VENTUNO Q" src="https://github.com/user-attachments/assets/e9828e20-6a0e-41b7-a675-73f105d712e0" />
 
 The camera detects your hand gesture (rock, paper, or scissors) via object detection inference, while the Arduino picks a random move, and the local LLM comments the game. Are you going to win the Arduino?
 
