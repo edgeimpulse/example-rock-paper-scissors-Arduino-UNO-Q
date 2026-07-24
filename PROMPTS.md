@@ -376,3 +376,83 @@ The user asked for a plan and clarifying questions before any coding.
 
 - Appended Sessions 7 and 8; committed the detection-stall fix
   (`python/main.py`) plus this log and pushed to `mpous/ventuno`.
+
+---
+
+## Session 9 — Add inference logging + timing to the detection callback
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> In Python I want to see the logs of the object detection inference when it
+> happens in the application. I don't think the object detection inference is
+> running at all in the application. Also give me the inference time in the
+> application.
+
+### Thinking / investigation
+
+- Checked the `video_object_detection` brick source on GitHub to confirm what is
+  actually available to the app, rather than guessing. Two decisive findings:
+  1. **`on_detect_all` only fires when there is at least one detection**
+     (`if len(detections) > 0`). Empty frames trigger *no* callback. So if the
+     model finds nothing above its confidence threshold, the app sees zero
+     logs — which is exactly why it *looked* like "inference isn't running at
+     all." Silence ≠ dead loop; it can just mean nothing scored ≥ confidence.
+  2. **The brick exposes no inference-time / timestamp / latency / fps field.**
+     `time.time()` is used internally only for debounce bookkeeping. The only
+     timing observable from the app is the *interval between callbacks*.
+- Also relevant: the current brick is initialized with `confidence=0.6`, so weak
+  detections are filtered out *before* our callback — reinforcing the silence.
+- **Constraint carried over from Session 7:** any new logging must not re-create
+  the per-frame `print()` firehose that filled the App Lab stdout pipe and (via
+  Python's shared `sys.stdout` lock) stalled the detection callback thread.
+
+### Changes made (`python/main.py` only)
+
+- Added module-level timing state (`_infer_last_ts`, `_infer_last_log`,
+  `_infer_count`, `_infer_intervals`, `_infer_lock`).
+- In `handle_detections`, on every callback: increment the count, record the
+  interval since the previous callback (rolling window of the last 100), and
+  emit a **throttled `[INFER]` heartbeat at most once per second**:
+  ```
+  [INFER] result #142  interval=118ms  avg=121ms  ~8.3/s
+  ```
+  - `result #N` — running callback count, proves inference is delivering results.
+  - `interval` — ms since the previous callback (latest cadence).
+  - `avg` — rolling average over the last 100 callbacks.
+  - `~X/s` — effective detection rate.
+- The 1/sec throttle keeps the heartbeat always-on (so inference activity is
+  visible) without reintroducing the stdout backpressure stall. Per-frame raw
+  output stays gated behind `DEBUG_DETECTIONS=1` (`[BRICK-RAW]`).
+
+### Flagged to user (not code-fixable here)
+
+- **The interval is a cadence proxy, not true model latency.** It reflects
+  camera + inference + delivery time between results, because the brick does not
+  surface a raw forward-pass duration.
+- **No `[INFER]` line can still mean inference is running** but nothing scored ≥
+  the brick's `confidence=0.6`. To surface weaker frames, lower the brick
+  `confidence` (e.g. `0.3`) — offered to the user, not yet applied.
+
+### Outcome / status
+
+- Logging + timing added; deterministic and throttle-safe.
+- **Not runnable locally** (no Python; bricks are board-only) — deploy to the
+  UNO Q and watch for `[INFER]` lines in the app logs to confirm live inference.
+
+---
+
+## Session 10 — Log Session 9, commit and push
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Commit push to the ventuno branch. Append all the information into the
+> PROMPTS.md file.
+
+### Outcome
+
+- Appended Sessions 9 and 10; committed the inference-logging change
+  (`python/main.py`) plus this log and pushed to `mpous/ventuno`.
