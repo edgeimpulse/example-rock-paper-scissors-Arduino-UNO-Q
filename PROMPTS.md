@@ -233,5 +233,77 @@ The user asked for a plan and clarifying questions before any coding.
 ### Outcome
 
 - Committed the live-commentator changes and pushed to `mpous/ventuno`.
+- The first push was rejected: the remote `ventuno` had a new `Update README.md`
+  commit. Fetched, **rebased** the local commit on top of it (clean, different
+  files — no shared-history rewrite), then pushed (`db0c6f1..87ec9d3`).
+- Noticed the remote reports the repo was **renamed** to
+  `example-rock-paper-scissors-Arduino-VENTUNO-Q` (the `...-UNO-Q` URL still
+  redirects, so the push worked). Offered to update the remote URL.
+
+---
+
+## Session 5 — Move commentary to a sidebar and kill the flicker
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> It works great, however let's do the live commentary on the side so it doesn't
+> move history and the play buttons below. There's a flickering effect with the
+> comments — they show for half a second and come back all the time, which is
+> very unpleasant. The text needs to stay there and not flicker. Improve this.
+
+### Thinking / diagnosis
+
+- **Flicker root cause:** `updateCommentary` rebuilt `commentaryFeed.innerHTML`
+  on *every* 500 ms poll, and the slide-in animation was on the base
+  `.commentary-feed li` rule. So every poll recreated the DOM nodes and
+  restarted the fade-in (opacity 0→1) on all lines — read as constant flicker.
+- **Layout cause:** the feed was in the vertical document flow (between the
+  result banner and the controls), so as lines were added/removed its height
+  changed and pushed the controls and history up/down.
+
+### Changes made (`python/templates/index.html` only)
+
+- **Diff-based rendering:** cache the last rendered lines in
+  `renderedCommentary`; `updateCommentary` returns early when the feed is
+  unchanged, so stable text is never re-written. On a real change, only lines
+  not present before get a `new` class.
+- **Animation scoped to new items:** moved `animation: slidein` off the base
+  `li` onto `.commentary-feed li.new`, so only a freshly-arrived comment
+  animates once; existing lines stay still.
+- **Two-column layout:** wrapped the game in `.layout` (flex row) → `.main`
+  column (scoreboard, panels, banner, controls, history, reset) on the left and
+  a `.commentary` **sidebar** (fixed 320px, `position: sticky`, `max-height`
+  with internal `overflow-y: auto`) on the right. The sidebar's growth no longer
+  affects the main column, so history and buttons never move.
+- **Responsive:** at ≤900px the layout stacks (commentary full-width below the
+  game, capped height); the existing ≤640px rules are unchanged.
+- Reset also clears `renderedCommentary` to keep the diff state in sync.
+
+### Outcome / status
+
+- Flicker fix is deterministic in the render logic; commentary now lives in a
+  right-hand sidebar that scrolls internally.
+- **Not runnable locally** (no Python; bricks are board-only) — needs on-device
+  verification for feel.
+- Open question offered to the user: sidebar is on the right; could move to the
+  left if preferred.
+
+---
+
+## Session 6 — Log Session 5, commit and push
+
+**Date:** 2026-07-24
+
+### User prompt
+
+> Log everything on the PROMPTS.md, commit and push to the ventuno branch.
+
+### Outcome
+
+- Appended Sessions 5 and 6 to `PROMPTS.md`; committed the sidebar/flicker fix
+  plus this log and pushed to `mpous/ventuno`.
+
 
 
