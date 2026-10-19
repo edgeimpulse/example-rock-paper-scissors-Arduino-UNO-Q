@@ -135,3 +135,8 @@ Feel free to reach out to us on the [Edge Impulse forum](https://forum.edgeimpul
 ## Disclaimer
 
 This project is intended for educational and experimental purposes only. It is not hardened for production use. Do not deploy in any safety-critical environments without proper security, testing, and validation.
+
+
+## License
+
+[BSD 3-Clause Clear](LICENSE)
